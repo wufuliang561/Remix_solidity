@@ -1,10 +1,14 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.18;
+
+import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+
 error CarbonTrader_NotOwner();
 error CarbonTrader_ParamError();
+error CarbonTrader_transferFailed();
 contract  CarbonTrader {
 
-    struct treade {
+    struct Trade {
         address seller; // 卖家地址
         uint256 sellAmount; // 要拍卖的额度
         uint256 startTimeStamp; //拍卖开始时间戳
@@ -20,12 +24,17 @@ contract  CarbonTrader {
     mapping (address => uint256) private s_addressToAllowances;
     // 被冻结的碳积分
     mapping (address => uint256) private  s_freezeAllowance;
-    mapping (string => treade) private  s_trade;
+    // 交易信息
+    mapping (string => Trade) private  s_trade;
+    // 用户账户金额
+    mapping (address => uint256) private s_auctionAmount;
 
     // 管理员地址,补课修改
     address private  immutable i_owner;
-    constructor () {
+    IERC20 private immutable i_usdt_token;
+    constructor (address usdtTokenAddress) {
         i_owner = msg.sender;
+        i_usdt_token = IERC20(usdtTokenAddress);
     }
     // 装饰器
     modifier onlyOwner() {
@@ -87,7 +96,7 @@ contract  CarbonTrader {
             minimumBidAmount > amount
         ) revert CarbonTrader_ParamError();
 
-        treade storage newTrade = s_trade[tradeId];
+        Trade storage newTrade = s_trade[tradeId];
         newTrade.seller = msg.sender;
         newTrade.sellAmount = amount;
         newTrade.startTimeStamp = stratTimeStamp;
@@ -100,7 +109,80 @@ contract  CarbonTrader {
         s_freezeAllowance[msg.sender] += amount;
 
     }
+    // 获取交易
+    function getTread (string memory treadId) public view returns (address,uint256,uint256,uint256,uint256,uint256){
+        Trade storage curTrade = s_trade[treadId];
+        return (
+            curTrade.seller,
+            curTrade.sellAmount,
+            curTrade.startTimeStamp,
+            curTrade.endTimeStamp,
+            curTrade.initPriceOfUint,
+            curTrade.minimumBidAmount
+        );
+    }
+    function deposit(string memory treadId, uint256 amount, string memory info) public {
+        Trade storage curTrade = s_trade[treadId];
+        bool success = i_usdt_token.transferFrom(msg.sender, address(this), amount);
+        if (!success) revert CarbonTrader_transferFailed();
+        // 存储质押金额
+        curTrade.deeposits[msg.sender] = amount;
+        setInfo(treadId, info);
+
+    }
+    function refundDeposit(string memory treadId) public {
+        Trade storage curTrade = s_trade[treadId];
+        uint256 depositAmount = curTrade.deeposits[msg.sender];
+        curTrade.deeposits[msg.sender] = 0;
+        bool success = i_usdt_token.transfer(msg.sender, depositAmount);
+        if (!success) {
+            curTrade.deeposits[msg.sender] = depositAmount;
+            revert CarbonTrader_transferFailed();
+        }
+
+    }
+
+    function setInfo(string memory treadId,string memory info) private {
+        Trade storage curTrade = s_trade[treadId];
+        curTrade.bidInfos[msg.sender] = info;
+    }
+     
+     function setBidSecret(string memory treadId, string memory secret)public {
+        Trade storage curTrade = s_trade[treadId];
+        curTrade.bidSecrets[msg.sender] = secret;
+     }
+     function getBidSecret(string memory treadId) public view returns(string memory) {
+        Trade storage curTrade = s_trade[treadId];
+        return curTrade.bidSecrets[msg.sender];
+     }
+    // 结算
+    function finalizeAuctionAndTransferCarbon(
+        string memory treadId, uint256 allowanceAmount,uint256 addtionalAmountToPay
+        ) public {
+        Trade storage curTrade = s_trade[treadId];
+        // 获取保证金
+        uint256 depositAmount = curTrade.deeposits[msg.sender];
+        s_trade[treadId].deeposits[msg.sender] = 0;
+        s_auctionAmount[curTrade.seller] += depositAmount +addtionalAmountToPay;
+        // 扣除卖家碳额度
+        s_addressToAllowances[curTrade.seller] -= allowanceAmount;
+        // 增加买家碳额度
+        s_addressToAllowances[msg.sender] += allowanceAmount;
+
+        // 扣除需要补的钱
+         bool success = i_usdt_token.transferFrom(msg.sender, address(this), addtionalAmountToPay);
+        if (!success) revert CarbonTrader_transferFailed();
 
 
+    }
+    function withdrawAcutionAmount()public {
+        uint256 amount = s_auctionAmount[msg.sender];
+        s_auctionAmount[msg.sender] = 0;
+         bool success = i_usdt_token.transfer(msg.sender, amount);
+        if (!success) {
+           s_auctionAmount[msg.sender] = amount;
+            revert CarbonTrader_transferFailed();
+        }
+    }
 
 }
